@@ -1,0 +1,32 @@
+# Standalone production deployment of JUST the backend, against an
+# externally managed Postgres (RDS, Cloud SQL, a shared DB host, ...) --
+# for deploying infrahub-api independently of infrahub-ui/Postgres, e.g.
+# onto its own compute. To run the whole stack (Postgres + backend +
+# frontend) together in one place instead, see docker-compose.prod.yml at
+# the repo root.
+#
+#   docker compose up -d --build
+#   docker compose exec infrahub-api ./migrate up
+#
+# Required first: production.ini.enc filled in with real values
+# (DATABASE_URL must point at your real Postgres endpoint -- "postgres"
+# as a hostname only resolves inside the repo-root compose's own
+# network, not here) and INFRAHUB_MASTER_KEY set in the shell/CI secret
+# store that runs this command (never baked into the image or committed
+# -- see internal/config/encrypted_env.go).
+services:
+  infrahub-api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      INFRAHUB_MASTER_KEY: ${INFRAHUB_MASTER_KEY:?INFRAHUB_MASTER_KEY is required -- it decrypts production.ini.enc, see docs/deployment.md}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

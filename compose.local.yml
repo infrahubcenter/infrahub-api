@@ -1,0 +1,62 @@
+# Fully containerized local run of JUST the backend -- builds this
+# folder's own Dockerfile and runs it against a throwaway Postgres, both
+# in one network. For testing the actual production image locally,
+# distinct from the day-to-day dev flow (`go run ./cmd/server` against
+# the repo-root docker-compose.yml's Postgres, see README.md). Safe to
+# run alongside that flow: separate container name/volume, no
+# conflicting host ports beyond 8080.
+#
+#   docker compose -f compose.local.yml up -d --build
+#   docker compose -f compose.local.yml exec infrahub-api ./migrate up
+#
+# Master key: bind-mounts this developer's own .master.key (gitignored,
+# see internal/config/encrypted_env.go) into the image's WORKDIR so
+# APP_ENV=development's local-file fallback resolves it automatically --
+# generate one first with `go run ./cmd/gen-encryption-key` if it doesn't
+# exist yet.
+#
+# DATABASE_URL is overridden below rather than read from
+# development.ini.enc, whose own baked-in value points at "localhost"
+# (correct when the server runs directly on the host) -- inside this
+# compose network Postgres must be addressed by its service name instead.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: infrahub-api-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vmcc
+      POSTGRES_USER: vmcc
+      POSTGRES_PASSWORD: vmcc_dev_password
+    volumes:
+      - infrahub_api_local_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vmcc -d vmcc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  infrahub-api:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgres://vmcc:vmcc_dev_password@postgres:5432/vmcc?sslmode=disable
+    volumes:
+      - ./development.ini.enc:/app/development.ini.enc:ro
+      - ./.master.key:/app/.master.key:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  infrahub_api_local_postgres_data:

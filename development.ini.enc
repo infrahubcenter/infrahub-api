@@ -1,0 +1,67 @@
+# InfraHub backend configuration -- development.
+#
+# This file holds this developer's own real local secrets (unlike
+# production.ini.enc, still just a placeholder template) -- gitignored
+# for that reason, even though the values are AES-256-GCM encrypted
+# (wrapped as ENC(...)) rather than plaintext, replacing the old
+# infrahub-api/.env (which had to stay untracked too, so every machine
+# kept its own manually-synced copy with no history or diff review). The
+# one master key that decrypts these ENC(...) values is separately
+# gitignored -- see infrahub-api/.master.key for local development, or
+# INFRAHUB_MASTER_KEY as a real environment variable everywhere else.
+#
+# To read the current value of an encrypted line, decrypt it yourself --
+# there's no "show me" command by design (a future teammate must not be
+# able to read secrets they don't already have the key for, just because
+# they can read this file). To CHANGE one: encrypt the new value and
+# replace the line.
+#
+#   Generate a master key:  go run ./cmd/gen-encryption-key
+#   Encrypt a value:        INFRAHUB_MASTER_KEY=<key> go run ./cmd/encrypt-config-value "the new value"
+#
+# Non-secret settings (ports, URLs, intervals, ...) are plain text here on
+# purpose -- only values that are actually secret get encrypted.
+
+[app]
+APP_ENV=development
+APP_PORT=8080
+
+[database]
+# postgres://vmcc:***@localhost:5432/vmcc -- encrypted because the
+# password is embedded directly in the connection string.
+DATABASE_URL=ENC(TIuxe4NB+g+SSPzhKqbVxyJn3wWILoT5xD1LmAJR4eaYtIJvWcwt6CyNcmT0spl4QXD0Ca3YKkFoX6M/+DVQYXL3quOBFhfscLGNL5kzpKu6FvHb+D0sC0A5iKq9mg6DMg==)
+
+[auth]
+JWT_SECRET=ENC(P90NMh2lBlzqss93RyLogA+u7YIK1V0GhA9aQfCVtQjpln09KBc/AenHOAfyLdlN7s8rmECDTVIdwQUkntah1otu3zs0JvYQ0iYWi5XxnNdOO77vDpFEgMHkTQs=)
+
+[public-url]
+# Single source of truth for this app's public URL (one ngrok tunnel
+# covers both frontend and backend via the local reverse proxy -- see
+# dev-proxy.mjs). The backend derives FRONTEND_ORIGIN, APP_BASE_URL,
+# OAUTH_REDIRECT_BASE_URL, and all three agent connect URLs (Docker/VM/
+# K8s) from this one value automatically -- change it here only, in one
+# place, whenever the public URL changes.
+PUBLIC_URL=https://dipping-sympathy-stadium.ngrok-free.dev
+
+[bootstrap-admin]
+BOOTSTRAP_ADMIN_EMAIL=admin@vmcc.local
+BOOTSTRAP_ADMIN_NAME=Admin
+BOOTSTRAP_ADMIN_PASSWORD=ENC(/VBDfwwO4nDIdMoG4vO6BK+oEJtl+BDkr78/ZYwS5CiZKrMkLQ5qAqIjZld8ihMpIr//svA=)
+
+[credentials]
+# The one secret that can't have a built-in default: it's the AES-256 key
+# that decrypts every SSH private key already stored in the database.
+# Everything else that used to live here (SSH timeouts, VM monitor
+# thresholds, package/docker scan intervals, update/reboot worker tuning)
+# has a sane built-in default in the Go code itself -- nothing to set,
+# nothing to keep in sync across machines. Only add one of those back
+# here if a specific value genuinely needs to differ from its default.
+SSH_CREDENTIAL_ENCRYPTION_KEY=ENC(3LHM+BetAZmHI4whlkPeuDP4EKGVs9qvaqBw/CbM08JKGTbLTEcXBp0AcZQsTmz7pUp86h5ONp+4WZ5b1l6uU4+3t4nzWOWS)
+
+[log-archive]
+# Off by default locally too -- flip to "volume" to try the log archive
+# feature against a plain local folder (no S3 credentials needed for
+# that). See production.ini.enc's own [log-archive] section for the "s3"
+# backend's fuller config; not needed here.
+LOG_ARCHIVE_BACKEND=none
+LOG_ARCHIVE_VOLUME_PATH=./log-archive

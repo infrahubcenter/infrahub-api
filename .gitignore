@@ -1,0 +1,50 @@
+# --- Go Build ---
+/bin/
+/tmp/
+/server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# --- Dependencies ---
+vendor/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Environment ---
+.env
+.env.local
+.env.*.local
+# Contains a real JWT_SECRET/DB password from before the encrypted
+# development.ini.enc config replaced plain .env files -- never commit.
+.env.superseded-by-ini
+
+# The one key that decrypts development.ini/production.ini's ENC(...)
+# values (local development convenience only -- see
+# internal/config/encrypted_env.go). Never commit this; production sets
+# INFRAHUB_MASTER_KEY as a real environment variable instead of a file.
+.master.key
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+
+
+# --- Local-only (never committed) ---
+start.sh
+.gotmp*/
+.local-logs/
+/CLAUDE.md
+/AGENTS.md

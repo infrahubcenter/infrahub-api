@@ -1,0 +1,72 @@
+# InfraHub backend configuration -- production.
+#
+# Safe to commit once filled in, for the same reason development.ini is:
+# every secret value below must be wrapped as ENC(...) (AES-256-GCM), not
+# plaintext. The master key that decrypts these values must be set as a
+# REAL environment variable (INFRAHUB_MASTER_KEY) wherever this actually
+# runs -- systemd unit, Docker secret, CI/CD secret store, ... -- never
+# as a file on the production host itself. (Contrast with
+# development.ini.enc, which additionally allows a local, gitignored
+# infrahub-api/.master.key file purely for developer convenience; that
+# fallback is deliberately never consulted when APP_ENV=production, see
+# internal/config/encrypted_env.go.)
+#
+#   Generate a master key:  go run ./cmd/gen-encryption-key
+#   Encrypt a value:        INFRAHUB_MASTER_KEY=<key> go run ./cmd/encrypt-config-value "the value"
+#
+# This file is currently a template -- no production deployment exists
+# yet. Replace every placeholder below (and delete this comment block)
+# before pointing a real APP_ENV=production process at it.
+
+[app]
+APP_ENV=production
+APP_PORT=8080
+
+[database]
+DATABASE_URL=ENC(replace-with-an-encrypted-postgres-connection-string)
+
+[auth]
+JWT_SECRET=ENC(replace-with-an-encrypted-random-secret)
+
+[public-url]
+# The one externally-reachable origin this deployment is served from.
+PUBLIC_URL=https://replace-with-your-real-domain
+
+[bootstrap-admin]
+# Only needed for the very first boot of a brand-new deployment (creates
+# the first Owner account if none exists yet; a silent no-op on every
+# later restart). Safe to remove once that first Owner exists.
+BOOTSTRAP_ADMIN_EMAIL=replace-with-a-real-email
+BOOTSTRAP_ADMIN_NAME=Owner
+BOOTSTRAP_ADMIN_PASSWORD=ENC(replace-with-an-encrypted-strong-password)
+
+[credentials]
+SSH_CREDENTIAL_ENCRYPTION_KEY=ENC(replace-with-an-encrypted-copy-of-a-generated-key)
+
+[log-archive]
+# Archives captured Docker/K8s/Docker-Host log lines right before their
+# retention window deletes them -- see internal/services/log_archive.go.
+# LOG_ARCHIVE_BACKEND picks exactly one: "none" (default, just deletes),
+# "volume", or "s3". Both backends' settings live here (not .env) so a
+# production deployment has exactly one place for this feature's config;
+# only the backend actually selected below is read at startup.
+LOG_ARCHIVE_BACKEND=none
+
+# --- "volume": append-only NDJSON files under this directory, one per
+# (table, day) -- point this at a mounted, persistent volume (see
+# docker-compose.prod.yml), not container-local storage.
+LOG_ARCHIVE_VOLUME_PATH=/data/log-archive
+
+# --- "s3": the same NDJSON, uploaded to an S3-compatible bucket (AWS S3,
+# MinIO, R2, ...) -- one object per retention sweep. Reuses the object
+# storage feature's own S3 client shape, just pointed at a fixed,
+# app-level archive bucket instead of a per-resource one.
+# LOG_ARCHIVE_S3_ENDPOINT is only needed for a non-AWS provider.
+# LOG_ARCHIVE_S3_PREFIX is prepended to every uploaded object's key (e.g.
+# "infrahub-logs/") -- leave blank to upload at the bucket root.
+LOG_ARCHIVE_S3_BUCKET=replace-with-your-bucket-name
+LOG_ARCHIVE_S3_REGION=replace-with-your-region
+LOG_ARCHIVE_S3_ENDPOINT=
+LOG_ARCHIVE_S3_PREFIX=infrahub-logs/
+LOG_ARCHIVE_S3_ACCESS_KEY_ID=replace-with-your-access-key-id
+LOG_ARCHIVE_S3_SECRET_ACCESS_KEY=ENC(replace-with-an-encrypted-s3-secret-access-key)
