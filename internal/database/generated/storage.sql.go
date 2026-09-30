@@ -932,7 +932,12 @@ func (q *Queries) SetObjectStorageMonitoringEnabled(ctx context.Context, arg Set
 }
 
 const softDeleteObjectStorageResource = `-- name: SoftDeleteObjectStorageResource :exec
-UPDATE object_storages SET deleted_at = now(), monitoring_enabled = false WHERE id = $1
+WITH deleted AS (
+    UPDATE object_storages SET deleted_at = now(), monitoring_enabled = false WHERE object_storages.id = $1
+    RETURNING object_storages.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL
 `
 
 // Removes the monitoring configuration only -- never touches the real S3

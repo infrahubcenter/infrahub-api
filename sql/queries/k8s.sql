@@ -87,7 +87,16 @@ UPDATE k8s_clusters SET last_discovered_at = now() WHERE id = $1;
 -- Removes the monitoring registration only -- never touches the real
 -- cluster. monitoring_enabled also cleared so no scheduler ever picks
 -- this instance up again. Mirrors SoftDeleteObjectStorageResource.
-UPDATE k8s_clusters SET deleted_at = now(), monitoring_enabled = false WHERE id = $1;
+-- Also soft-deletes the owning resources row in the same statement:
+-- previously only this table was marked, leaving an active resources row
+-- behind that still counted toward its workspace ("workspace is not
+-- empty") and resource totals after every delete.
+WITH deleted AS (
+    UPDATE k8s_clusters SET deleted_at = now(), monitoring_enabled = false WHERE k8s_clusters.id = $1
+    RETURNING k8s_clusters.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL;
 
 -- Credentials: see sql/queries/k8s_agent.sql -- kubeconfig upload was
 -- retired in favor of an in-cluster agent authenticating with a bearer

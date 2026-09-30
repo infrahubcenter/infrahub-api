@@ -195,7 +195,16 @@ WHERE wm.user_id = $1 AND w.is_active = true
 -- Removes the monitoring configuration only (spec §82) -- never drops
 -- the real external database. monitoring_enabled is also cleared so no
 -- scheduler ever picks this instance up again.
-UPDATE databases SET deleted_at = now(), monitoring_enabled = false WHERE id = $1;
+-- Also soft-deletes the owning resources row in the same statement:
+-- previously only this table was marked, leaving an active resources row
+-- behind that still counted toward its workspace ("workspace is not
+-- empty") and resource totals after every delete.
+WITH deleted AS (
+    UPDATE databases SET deleted_at = now(), monitoring_enabled = false WHERE databases.id = $1
+    RETURNING databases.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL;
 
 -- name: UpdateDatabaseConfig :one
 -- Admin create/edit of a standalone database's connection details (spec

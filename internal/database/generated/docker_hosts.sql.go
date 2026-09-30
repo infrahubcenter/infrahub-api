@@ -234,7 +234,12 @@ func (q *Queries) SetDockerHostMonitoringEnabled(ctx context.Context, arg SetDoc
 }
 
 const softDeleteDockerHostResource = `-- name: SoftDeleteDockerHostResource :exec
-UPDATE docker_hosts SET deleted_at = now(), monitoring_enabled = false WHERE id = $1
+WITH deleted AS (
+    UPDATE docker_hosts SET deleted_at = now(), monitoring_enabled = false WHERE docker_hosts.id = $1
+    RETURNING docker_hosts.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL
 `
 
 // Removes the monitoring registration only -- never touches the real

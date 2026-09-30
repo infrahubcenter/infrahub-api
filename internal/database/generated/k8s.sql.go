@@ -669,7 +669,12 @@ func (q *Queries) SetK8sClusterMonitoringEnabled(ctx context.Context, arg SetK8s
 }
 
 const softDeleteK8sClusterResource = `-- name: SoftDeleteK8sClusterResource :exec
-UPDATE k8s_clusters SET deleted_at = now(), monitoring_enabled = false WHERE id = $1
+WITH deleted AS (
+    UPDATE k8s_clusters SET deleted_at = now(), monitoring_enabled = false WHERE k8s_clusters.id = $1
+    RETURNING k8s_clusters.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL
 `
 
 // Removes the monitoring registration only -- never touches the real

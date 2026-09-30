@@ -1309,7 +1309,12 @@ func (q *Queries) SetDatabaseMonitoringEnabled(ctx context.Context, arg SetDatab
 }
 
 const softDeleteDatabaseResource = `-- name: SoftDeleteDatabaseResource :exec
-UPDATE databases SET deleted_at = now(), monitoring_enabled = false WHERE id = $1
+WITH deleted AS (
+    UPDATE databases SET deleted_at = now(), monitoring_enabled = false WHERE databases.id = $1
+    RETURNING databases.resource_id
+)
+UPDATE resources SET deleted_at = now(), updated_at = now()
+WHERE id IN (SELECT resource_id FROM deleted) AND deleted_at IS NULL
 `
 
 // Removes the monitoring configuration only (spec §82) -- never drops
