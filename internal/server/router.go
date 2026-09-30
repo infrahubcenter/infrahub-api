@@ -144,9 +144,11 @@ type Dependencies struct {
 	ObjectStorageDownloadURLTTL    time.Duration
 	CookieSecure                   bool
 	FrontendOrigin                 string
-	MaxRequestBodyBytes            int64
-	LoginRateLimitAttempts         int32
-	LoginRateLimitWindow           time.Duration
+	// ProxyKey (INFRAHUB_PROXY_KEY): see middleware.RequireProxyKey.
+	ProxyKey               string
+	MaxRequestBodyBytes    int64
+	LoginRateLimitAttempts int32
+	LoginRateLimitWindow   time.Duration
 	// Step 21: Operations/Audit Logs/Settings.
 	AuditQuery       *services.AuditQueryService
 	UserPreferences  *services.UserPreferencesService
@@ -292,6 +294,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Authenticated (any role) -- resource-level authorization, where it
 	// applies, happens inside the handler via AuthorizationService/VMService.
 	mux.Handle("GET /api/auth/me", authenticated(authHandler.Me))
+	mux.Handle("POST /api/auth/ws-ticket", authenticated(handlers.WSTicket(deps.Tokens)))
 	mux.Handle("GET /api/my-access", authenticated(myAccessHandler.Get))
 	mux.Handle("GET /api/my-access/vms", authenticated(myAccessHandler.ListVMs))
 	mux.Handle("GET /api/vms", authenticated(vmHandler.List))
@@ -840,6 +843,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	var h http.Handler = mux
 	h = middleware.Recovery(logger)(h)
+	h = middleware.RequireProxyKey(deps.ProxyKey)(h)
 	h = middleware.CORS(deps.FrontendOrigin)(h)
 	h = middleware.MaxBody(deps.MaxRequestBodyBytes)(h)
 	h = middleware.SecurityHeaders(deps.CookieSecure)(h)

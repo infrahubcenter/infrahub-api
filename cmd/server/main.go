@@ -588,6 +588,7 @@ func run(logger *slog.Logger) error {
 		ObjectStorageDownloadURLTTL:    cfg.ObjectStorageDownloadURLTTL,
 		CookieSecure:                   cfg.CookieSecure,
 		FrontendOrigin:                 cfg.FrontendOrigin,
+		ProxyKey:                       cfg.ProxyKey,
 		MaxRequestBodyBytes:            cfg.MaxRequestBodyBytes,
 		LoginRateLimitAttempts:         cfg.LoginRateLimitAttempts,
 		LoginRateLimitWindow:           cfg.LoginRateLimitWindow,

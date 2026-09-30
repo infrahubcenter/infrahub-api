@@ -57,6 +57,48 @@ func (s *TokenService) IssueAccessToken(userID uuid.UUID, role string) (string, 
 	return signed, nil
 }
 
+// WSTicketAudience marks a WebSocket ticket: a short-lived token a console
+// served from another site (e.g. the hosted console on Vercel, whose login
+// cookie never reaches this backend's own domain) passes as ?ws_ticket= to
+// open a WebSocket directly to this API. RequireAuthentication accepts it
+// only on WebSocket upgrades, and never accepts it as a normal login.
+const WSTicketAudience = "ws-ticket"
+
+// WSTicketTTL is how long a WebSocket ticket can be used to open a
+// connection (an already-open connection is unaffected by it expiring).
+const WSTicketTTL = 2 * time.Minute
+
+// IssueWSTicket creates a WebSocket ticket for userID/role.
+func (s *TokenService) IssueWSTicket(userID uuid.UUID, role string) (string, error) {
+	now := time.Now()
+	claims := AccessTokenClaims{
+		UserID: userID,
+		Role:   role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.NewString(),
+			Subject:   userID.String(),
+			Audience:  jwt.ClaimStrings{WSTicketAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(WSTicketTTL)),
+		},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("sign ws ticket: %w", err)
+	}
+	return signed, nil
+}
+
+// IsWSTicket reports whether claims belong to a WebSocket ticket.
+func IsWSTicket(claims *AccessTokenClaims) bool {
+	for _, a := range claims.Audience {
+		if a == WSTicketAudience {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseAccessToken validates signature and expiry and returns the claims.
 func (s *TokenService) ParseAccessToken(tokenString string) (*AccessTokenClaims, error) {
 	claims := &AccessTokenClaims{}

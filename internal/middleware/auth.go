@@ -24,7 +24,7 @@ const (
 func RequireAuthentication(tokens *services.TokenService, auth *services.AuthService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenString := accessTokenFromRequest(r)
+			tokenString, fromTicket := accessTokenFromRequest(r)
 			if tokenString == "" {
 				httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
 				return
@@ -32,6 +32,14 @@ func RequireAuthentication(tokens *services.TokenService, auth *services.AuthSer
 
 			claims, err := tokens.ParseAccessToken(tokenString)
 			if err != nil {
+				httpx.WriteError(w, http.StatusUnauthorized, "invalid or expired session")
+				return
+			}
+			// A WebSocket ticket is only valid as ?ws_ticket= on a WebSocket
+			// upgrade, and a ?ws_ticket= must actually be a ticket -- so a
+			// leaked ticket can't be replayed as a normal login, and a
+			// normal session token can't be passed around in URLs.
+			if fromTicket != services.IsWSTicket(claims) {
 				httpx.WriteError(w, http.StatusUnauthorized, "invalid or expired session")
 				return
 			}
@@ -48,14 +56,24 @@ func RequireAuthentication(tokens *services.TokenService, auth *services.AuthSer
 	}
 }
 
-func accessTokenFromRequest(r *http.Request) string {
+// accessTokenFromRequest returns the request's token and whether it came
+// from a ?ws_ticket= query parameter (accepted on WebSocket upgrades only).
+func accessTokenFromRequest(r *http.Request) (string, bool) {
 	if cookie, err := r.Cookie(AccessTokenCookie); err == nil && cookie.Value != "" {
-		return cookie.Value
+		return cookie.Value, false
 	}
 	if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
+		return strings.TrimPrefix(authHeader, "Bearer "), false
 	}
-	return ""
+	if ticket := r.URL.Query().Get("ws_ticket"); ticket != "" && IsWebSocketUpgrade(r) {
+		return ticket, true
+	}
+	return "", false
+}
+
+// IsWebSocketUpgrade reports whether r asks to upgrade to a WebSocket.
+func IsWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }
 
 // RequireRole allows the request through only if the authenticated user

@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"time"
+	"vmcontrolcenter/backend/internal/httpx"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -38,7 +39,7 @@ func (h *DockerHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			// cross-site WebSocket hijacking and is refused, mirroring
 			// middleware.CORS's single allowed origin for regular
 			// requests.
-			return origin == "" || origin == h.frontendOrigin
+			return origin == "" || httpx.OriginAllowed(h.frontendOrigin, origin)
 		},
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)

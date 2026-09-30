@@ -1,6 +1,10 @@
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+
+	"vmcontrolcenter/backend/internal/httpx"
+)
 
 // CORS allows the configured frontend origin to call the API with
 // credentials (cookies). Cookie *sending* between localhost:3000 and
@@ -10,7 +14,14 @@ import "net/http"
 func CORS(allowedOrigin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			// allowedOrigin may list several origins (comma-separated): echo
+			// the request's Origin only when it is one of them.
+			origin := r.Header.Get("Origin")
+			if httpx.OriginAllowed(allowedOrigin, origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", httpx.FirstOrigin(allowedOrigin))
+			}
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
 

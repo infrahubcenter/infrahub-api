@@ -20,7 +20,11 @@ type Config struct {
 	DBMinConns       int32
 	DBConnectTimeout time.Duration
 
-	FrontendOrigin  string
+	FrontendOrigin string
+	// ProxyKey (INFRAHUB_PROXY_KEY): when set, only requests carrying it in
+	// X-Infrahub-Proxy-Key (plus WebSocket upgrades and health checks) are
+	// served -- see middleware.RequireProxyKey.
+	ProxyKey        string
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	// CookieSecure controls the Secure flag on auth cookies. It defaults to
@@ -369,6 +373,7 @@ func Load() (*Config, error) {
 		DBConnectTimeout: time.Duration(getEnvInt32("DB_CONNECT_TIMEOUT_SECONDS", 5)) * time.Second,
 
 		FrontendOrigin:  getEnvOrPublicURL("FRONTEND_ORIGIN", publicURL, "http://localhost:3000"),
+		ProxyKey:        os.Getenv("INFRAHUB_PROXY_KEY"),
 		AccessTokenTTL:  time.Duration(getEnvInt32("ACCESS_TOKEN_TTL_MINUTES", 15)) * time.Minute,
 		RefreshTokenTTL: time.Duration(getEnvInt32("REFRESH_TOKEN_TTL_DAYS", 7)) * 24 * time.Hour,
 

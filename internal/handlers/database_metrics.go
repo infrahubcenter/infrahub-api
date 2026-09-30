@@ -128,7 +128,7 @@ func (h *DatabaseHandler) MetricsStream(w http.ResponseWriter, r *http.Request) 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			return origin == "" || origin == h.frontendOrigin
+			return origin == "" || httpx.OriginAllowed(h.frontendOrigin, origin)
 		},
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
