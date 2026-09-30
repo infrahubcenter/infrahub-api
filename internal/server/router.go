@@ -5,6 +5,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"vmcontrolcenter/backend/internal/handlers"
+	"vmcontrolcenter/backend/internal/httpx"
 	"vmcontrolcenter/backend/internal/middleware"
 	"vmcontrolcenter/backend/internal/repository"
 	"vmcontrolcenter/backend/internal/services"
@@ -21,7 +24,10 @@ import (
 // Dependencies are the services and configuration NewRouter needs. All
 // fields are required except Logger, which defaults to slog.Default().
 type Dependencies struct {
-	Pool                 *pgxpool.Pool
+	Pool *pgxpool.Pool
+	// Plan limits (see services.LicenseService). Nil means no limits, as in
+	// tests that don't exercise them.
+	License              *services.LicenseService
 	Store                *repository.Store
 	Tokens               *services.TokenService
 	Auth                 *services.AuthService
@@ -264,6 +270,63 @@ func NewRouter(deps Dependencies) http.Handler {
 	authenticated := func(next http.HandlerFunc) http.Handler {
 		return requireAuth(next)
 	}
+	// Refuses to add one more of kind past the plan's limit (403 with
+	// code "plan_limit"), before the create handler runs.
+	withinPlan := func(kind services.LimitKind, next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if deps.License != nil {
+				if err := deps.License.CheckCanAdd(r.Context(), kind); err != nil {
+					if services.IsPlanLimit(err) {
+						httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": err.Error(), "code": "plan_limit"})
+						return
+					}
+					httpx.WriteError(w, http.StatusInternalServerError, "could not check plan limits")
+					return
+				}
+			}
+			next(w, r)
+		}
+	}
+	// Re-enabling a disabled user counts against the user limit too.
+	withinPlanReactivation := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var req struct {
+				IsActive *bool `json:"is_active"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if req.IsActive != nil && *req.IsActive {
+				withinPlan(services.LimitUsers, next)(w, r)
+				return
+			}
+			next(w, r)
+		}
+	}
+	// Generic resources are created with a resource_type in the body.
+	withinPlanResource := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var req struct {
+				ResourceType string `json:"resource_type"`
+			}
+			_ = json.Unmarshal(body, &req)
+			kind := services.LimitDatabases
+			if req.ResourceType == "OBJECT_STORAGE" {
+				kind = services.LimitObjectStorage
+			}
+			withinPlan(kind, next)(w, r)
+		}
+	}
 	// Owner-exclusive: editing sign-in-method configuration. An Admin can
 	// still view the read-only status (GET /api/settings/platform stays
 	// under requireAdmin above) but never edit it.
@@ -315,10 +378,11 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("GET /api/monitoring/timeline", authenticated(monitoringDashboardHandler.Timeline))
 
 	// Admin only: users.
-	mux.Handle("POST /api/users", requireAdmin(userHandler.Create))
+	mux.Handle("GET /api/license", authenticated(handlers.License(deps.License)))
+	mux.Handle("POST /api/users", requireAdmin(withinPlan(services.LimitUsers, userHandler.Create)))
 	mux.Handle("GET /api/users", requireAdmin(userHandler.List))
 	mux.Handle("GET /api/users/{id}", requireAdmin(userHandler.Get))
-	mux.Handle("PATCH /api/users/{id}", requireAdmin(userHandler.Update))
+	mux.Handle("PATCH /api/users/{id}", requireAdmin(withinPlanReactivation(userHandler.Update)))
 	mux.Handle("DELETE /api/users/{id}", requireAdmin(userHandler.Delete))
 	mux.Handle("POST /api/users/{id}/vm-access", requireAdmin(accessHandler.GrantVMAccess))
 	mux.Handle("DELETE /api/users/{id}/vm-access/{vmId}", requireAdmin(accessHandler.RevokeVMAccess))
@@ -350,12 +414,12 @@ func NewRouter(deps Dependencies) http.Handler {
 	// VM creation/update goes through /api/vms below, not here).
 	mux.Handle("GET /api/resources", requireAdmin(resourceHandler.List))
 	mux.Handle("GET /api/resources/{id}", requireAdmin(resourceHandler.Get))
-	mux.Handle("POST /api/resources", requireAdmin(resourceHandler.Create))
+	mux.Handle("POST /api/resources", requireAdmin(withinPlanResource(resourceHandler.Create)))
 	mux.Handle("PATCH /api/resources/{id}", requireAdmin(resourceHandler.Update))
 
 	// Admin only: VM create/update/access (GET is authenticated-any-role above).
-	mux.Handle("POST /api/vms", requireAdmin(vmHandler.Create))
-	mux.Handle("POST /api/vms/agent-only", requireAdmin(vmAgentHandler.ConnectAgentOnly))
+	mux.Handle("POST /api/vms", requireAdmin(withinPlan(services.LimitVMs, vmHandler.Create)))
+	mux.Handle("POST /api/vms/agent-only", requireAdmin(withinPlan(services.LimitVMs, vmAgentHandler.ConnectAgentOnly)))
 	mux.Handle("PATCH /api/vms/{id}", requireAdmin(vmHandler.Update))
 	// Step 22: removes the VM resource from Infra Hub Center only -- never
 	// the actual remote server. Requires exact-name confirmation (see
@@ -483,7 +547,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// says whether it's a Docker or K8s grant, so no parallel endpoint is
 	// needed).
 	mux.Handle("GET /api/k8s/clusters", requireAdmin(k8sHandler.List))
-	mux.Handle("POST /api/k8s/clusters", requireAdmin(k8sHandler.Configure))
+	mux.Handle("POST /api/k8s/clusters", requireAdmin(withinPlan(services.LimitK8sClusters, k8sHandler.Configure)))
 	mux.Handle("GET /api/k8s/clusters/{id}", requireAdmin(k8sHandler.Get))
 	mux.Handle("PATCH /api/k8s/clusters/{id}", requireAdmin(k8sHandler.Update))
 	mux.Handle("DELETE /api/k8s/clusters/{id}", requireAdmin(k8sHandler.Delete))
@@ -498,7 +562,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// K8s cluster CRUD block above 1:1 (no connection-test/scan/nodes/
 	// resources yet; see docker_host.go's doc comment on scope).
 	mux.Handle("GET /api/docker/hosts", requireAdmin(dockerHostHandler.List))
-	mux.Handle("POST /api/docker/hosts", requireAdmin(dockerHostHandler.Configure))
+	mux.Handle("POST /api/docker/hosts", requireAdmin(withinPlan(services.LimitDockerHosts, dockerHostHandler.Configure)))
 	mux.Handle("GET /api/docker/hosts/{id}", requireAdmin(dockerHostHandler.Get))
 	mux.Handle("DELETE /api/docker/hosts/{id}", requireAdmin(dockerHostHandler.Delete))
 	mux.Handle("PUT /api/docker/hosts/{id}/monitoring", requireAdmin(dockerHostHandler.SetMonitoringEnabled))
@@ -651,7 +715,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// discipline); configure/update/delete/test/access-grant are
 	// admin-only.
 	mux.Handle("GET /api/databases", authenticated(databaseHandler.List))
-	mux.Handle("POST /api/databases", requireAdmin(databaseHandler.Configure))
+	mux.Handle("POST /api/databases", requireAdmin(withinPlan(services.LimitDatabases, databaseHandler.Configure)))
 	mux.Handle("GET /api/databases/performance", authenticated(databaseHandler.GlobalPerformanceOverview))
 	mux.Handle("GET /api/databases/{id}", authenticated(databaseHandler.Get))
 	mux.Handle("GET /api/databases/{id}/monitoring-health", authenticated(databaseHandler.MonitoringHealth))
@@ -757,7 +821,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// the handler (404-not-403 IDOR discipline); configure/update/delete/
 	// test-connection/access-grant are admin-only.
 	mux.Handle("GET /api/object-storage", authenticated(objectStorageHandler.List))
-	mux.Handle("POST /api/object-storage", requireAdmin(objectStorageHandler.Configure))
+	mux.Handle("POST /api/object-storage", requireAdmin(withinPlan(services.LimitObjectStorage, objectStorageHandler.Configure)))
 	// Step 17 Phase 5: cross-storage summary (dashboard/list-page stat
 	// cards) -- registered here, textually before GET /api/object-storage/{id},
 	// though Go 1.22+ net/http.ServeMux resolves this unambiguously by

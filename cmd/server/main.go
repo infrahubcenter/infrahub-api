@@ -37,6 +37,23 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// The plan (Community unless a valid INFRAHUB_LICENSE_KEY says
+	// otherwise) caps how long metrics and logs are kept, whatever the
+	// retention settings ask for.
+	license := services.ParseLicense(cfg.LicenseKey, time.Now())
+	if license.Error != "" {
+		logger.Warn("license key not applied, running the Community plan", "status", license.Status, "error", license.Error)
+	}
+	logger.Info("plan", "plan", license.Plan.Name, "licensee", license.Licensee)
+	plan := license.Plan
+	cfg.VMMonitorRetentionDays = plan.CapRetention(cfg.VMMonitorRetentionDays, false)
+	cfg.DockerMetricsRetentionDays = plan.CapRetention(cfg.DockerMetricsRetentionDays, false)
+	cfg.DatabaseMetricsRetentionDays = plan.CapRetention(cfg.DatabaseMetricsRetentionDays, false)
+	cfg.DatabaseQueryMetricsRetentionDays = plan.CapRetention(cfg.DatabaseQueryMetricsRetentionDays, false)
+	cfg.ObjectStorageMetricsRetentionDays = plan.CapRetention(cfg.ObjectStorageMetricsRetentionDays, false)
+	cfg.DockerLogRetentionDays = plan.CapRetention(cfg.DockerLogRetentionDays, true)
+	cfg.K8sLogRetentionDays = plan.CapRetention(cfg.K8sLogRetentionDays, true)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -56,6 +73,7 @@ func run(logger *slog.Logger) error {
 	)
 
 	store := repository.New(pool)
+	licenseService := services.NewLicenseService(pool, license)
 	tokens := services.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL)
 	authService := services.NewAuthService(store, tokens, cfg.RefreshTokenTTL)
 
@@ -589,6 +607,7 @@ func run(logger *slog.Logger) error {
 		CookieSecure:                   cfg.CookieSecure,
 		FrontendOrigin:                 cfg.FrontendOrigin,
 		ProxyKey:                       cfg.ProxyKey,
+		License:                        licenseService,
 		MaxRequestBodyBytes:            cfg.MaxRequestBodyBytes,
 		LoginRateLimitAttempts:         cfg.LoginRateLimitAttempts,
 		LoginRateLimitWindow:           cfg.LoginRateLimitWindow,
