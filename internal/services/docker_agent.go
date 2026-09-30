@@ -35,6 +35,10 @@ func (s *DockerAgentService) IsAgentConnected(vmResourceID uuid.UUID) bool {
 	return s.hub.IsConnected(vmResourceID)
 }
 
+// hostResourcesTimeout bounds the host_resources command -- see
+// HostResources.
+const hostResourcesTimeout = 60 * time.Second
+
 func (s *DockerAgentService) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, s.commandTimeout)
 }
@@ -120,7 +124,16 @@ func (s *DockerAgentService) HostResources(ctx context.Context, resourceID uuid.
 	if !s.hub.IsConnected(resourceID) {
 		return AgentHostResources{}, ErrDockerAgentOffline
 	}
-	reqCtx, cancel := s.withTimeout(ctx)
+	// Longer than the general command timeout: Docker's disk-usage walk
+	// (every image layer, volume and build-cache record) alone takes ~9s
+	// on a busy host. Current agents answer from a background cache, so
+	// this only matters for the first read after an agent starts, and for
+	// agents that predate that cache.
+	timeout := s.commandTimeout
+	if timeout < hostResourcesTimeout {
+		timeout = hostResourcesTimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	data, err := s.hub.SendCommand(reqCtx, resourceID, DockerAgentCommand{Type: DockerAgentCmdHostResources})
