@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"vmcontrolcenter/backend/internal/database/generated"
 	"vmcontrolcenter/backend/internal/pgutil"
@@ -61,17 +62,41 @@ func newAlertMetricLookup(store *repository.Store, dockerAgentHub *DockerAgentHu
 	}
 }
 
-func (l *alertMetricLookup) vmSnapshot(ctx context.Context, resourceID uuid.UUID) *generated.MonitoringSnapshot {
+// vmAgentSampleMaxAge bounds how old a VM Agent sample may be and still
+// drive a VM alert (the agent pushes every ~15s) -- so a disconnected
+// agent's last reading can't keep a threshold "breached" indefinitely.
+const vmAgentSampleMaxAge = 2 * time.Minute
+
+// vmSnapshot returns the VM's latest metrics from whichever source is
+// newer: the SSH monitor's monitoring_snapshots, or the VM Agent's
+// vm_agent_metric_snapshots. Agent-only VMs (Host Metrics & Logs) never
+// have SSH snapshots at all, so without the agent source their CPU/memory/
+// storage alert rules could never evaluate.
+func (l *alertMetricLookup) vmSnapshot(ctx context.Context, resourceID uuid.UUID, vmID pgtype.UUID) *generated.MonitoringSnapshot {
 	if snap, ok := l.vmSnapshots[resourceID]; ok {
 		return snap
 	}
-	snap, err := l.store.GetLatestMonitoringSnapshot(ctx, resourceID)
-	if err != nil {
-		l.vmSnapshots[resourceID] = nil
-		return nil
+	var best *generated.MonitoringSnapshot
+	if snap, err := l.store.GetLatestMonitoringSnapshot(ctx, resourceID); err == nil {
+		best = &snap
 	}
-	l.vmSnapshots[resourceID] = &snap
-	return &snap
+	if vmID.Valid {
+		if a, err := l.store.GetLatestVMAgentMetricSnapshot(ctx, uuid.UUID(vmID.Bytes)); err == nil &&
+			a.CapturedAt.Valid && time.Since(a.CapturedAt.Time) <= vmAgentSampleMaxAge &&
+			(best == nil || !best.CapturedAt.Valid || a.CapturedAt.Time.After(best.CapturedAt.Time)) {
+			best = &generated.MonitoringSnapshot{
+				ResourceID:        resourceID,
+				CapturedAt:        a.CapturedAt,
+				CpuUsagePercent:   a.CpuPercent,
+				MemoryUsedBytes:   a.MemoryUsedBytes,
+				MemoryTotalBytes:  a.MemoryTotalBytes,
+				StorageUsedBytes:  a.StorageUsedBytes,
+				StorageTotalBytes: a.StorageTotalBytes,
+			}
+		}
+	}
+	l.vmSnapshots[resourceID] = best
+	return best
 }
 
 func (l *alertMetricLookup) dbMetric(ctx context.Context, databaseID uuid.UUID) *generated.StandaloneDatabaseMetric {
@@ -134,7 +159,7 @@ func (l *alertMetricLookup) Resolve(ctx context.Context, row generated.ListEnabl
 		if !row.VmID.Valid {
 			return metricSample{}
 		}
-		snap := l.vmSnapshot(ctx, row.ResourceID)
+		snap := l.vmSnapshot(ctx, row.ResourceID, row.VmID)
 		if snap == nil || !snap.CpuUsagePercent.Valid {
 			return metricSample{}
 		}
@@ -144,7 +169,7 @@ func (l *alertMetricLookup) Resolve(ctx context.Context, row generated.ListEnabl
 		if !row.VmID.Valid {
 			return metricSample{}
 		}
-		snap := l.vmSnapshot(ctx, row.ResourceID)
+		snap := l.vmSnapshot(ctx, row.ResourceID, row.VmID)
 		if snap == nil || !snap.MemoryUsedBytes.Valid || !snap.MemoryTotalBytes.Valid || snap.MemoryTotalBytes.Int64 == 0 {
 			return metricSample{}
 		}
@@ -155,7 +180,7 @@ func (l *alertMetricLookup) Resolve(ctx context.Context, row generated.ListEnabl
 		if !row.VmID.Valid {
 			return metricSample{}
 		}
-		snap := l.vmSnapshot(ctx, row.ResourceID)
+		snap := l.vmSnapshot(ctx, row.ResourceID, row.VmID)
 		if snap == nil || !snap.StorageUsedBytes.Valid || !snap.StorageTotalBytes.Valid || snap.StorageTotalBytes.Int64 == 0 {
 			return metricSample{}
 		}
