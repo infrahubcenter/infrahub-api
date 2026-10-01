@@ -41,13 +41,13 @@ const (
 	LimitUsers         LimitKind = "users"
 )
 
-var limitLabels = map[LimitKind]string{
-	LimitVMs:           "VMs",
-	LimitDatabases:     "databases",
-	LimitObjectStorage: "object storage buckets",
-	LimitDockerHosts:   "Docker hosts",
-	LimitK8sClusters:   "Kubernetes clusters",
-	LimitUsers:         "users",
+var limitLabels = map[LimitKind][2]string{
+	LimitVMs:           {"VM", "VMs"},
+	LimitDatabases:     {"database", "databases"},
+	LimitObjectStorage: {"object storage bucket", "object storage buckets"},
+	LimitDockerHosts:   {"Docker host", "Docker hosts"},
+	LimitK8sClusters:   {"Kubernetes cluster", "Kubernetes clusters"},
+	LimitUsers:         {"user", "users"},
 }
 
 // AllLimitKinds is the display order.
@@ -171,7 +171,11 @@ type PlanLimitError struct {
 }
 
 func (e *PlanLimitError) Error() string {
-	return fmt.Sprintf("Your %s plan includes up to %d %s. Remove one or upgrade your plan to add more.", e.Plan, e.Limit, limitLabels[e.Kind])
+	label := limitLabels[e.Kind][1]
+	if e.Limit == 1 {
+		label = limitLabels[e.Kind][0]
+	}
+	return fmt.Sprintf("Your %s plan includes up to %d %s. Remove one or upgrade your plan to add more.", e.Plan, e.Limit, label)
 }
 
 // LicenseService answers "what plan is this" and "may we add one more".
