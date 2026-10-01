@@ -1,220 +1,388 @@
-// Package config: encrypted_env.go replaces the old plaintext .env file
-// with per-environment INI files (development.ini.enc/production.ini.enc) whose
-// secret values are individually AES-256-GCM encrypted, wrapped as
-// ENC(base64...). Everything else about how configuration reaches the
-// rest of this package is unchanged: this only replaces godotenv.Load()
-// (which populated the process environment from a plaintext .env) with
-// loadEnvFile (which populates it from a decrypted .ini) -- every
-// existing os.Getenv/getEnv* call below in config.go keeps working
-// verbatim.
+// Package config: encrypted_env.go loads configuration into the process
+// environment before config.go reads it with os.Getenv. Three sources,
+// highest priority first -- any one of them is enough on its own:
 //
-// Why this is actually safer than .env, not just differently-shaped: a
-// plaintext .env has to be kept OUT of version control entirely, so every
-// deployment/developer ends up with their own untracked copy, manually
-// kept in sync, with no history and no diff review. Once every secret
-// VALUE in development.ini.enc/production.ini.enc is ciphertext, the file itself
-// is safe to commit -- it's useless without the one master key, which is
-// the only thing that still needs to be distributed out-of-band (a
-// password manager, a CI/CD secret, ...) instead of N separate secrets.
+//  1. Real environment variables, from anywhere: docker run -e, Compose
+//     environment:, a Kubernetes Secret/ConfigMap, a systemd unit, your
+//     shell. Always win.
+//  2. A .env file: INFRAHUB_ENV_FILE, or .env in INFRAHUB_CONFIG_DIR (default
+//     the working directory). Plain KEY=VALUE lines; a value may be
+//     ENC(...)-wrapped (see cmd/encrypt-config-value).
+//  3. The stage's encrypted config file, <stage>.ini.enc in
+//     INFRAHUB_CONFIG_DIR. The whole file is one line of AES-256-GCM
+//     ciphertext ("IHCENC1:..."), so not even its key names are readable.
+//     Opening it takes two things:
+//     - the stage: STAGE = development | staging |
+//     production -- picks the file, and is bound into the encryption,
+//     so a staging file can't be loaded as production;
+//     - the secret: SECRET (or SECRET_FILE, a mounted file holding it;
+//     in development only, a gitignored .master.key file).
+//     Create/inspect one with: infrahub-config encrypt|decrypt (cmd/infrahub-config).
+//     Older files with individually ENC(...)-wrapped values still load.
+//
+// A source that doesn't exist is simply skipped. Every value only fills in
+// a variable nothing higher up has already set.
+//
+// Strict mode: setting STAGE means "this deployment runs from its
+// encrypted config". The API then refuses to start unless STAGE is a
+// known stage, SECRET (or SECRET_FILE) is given
+// explicitly -- no .master.key fallback -- and <stage>.ini.enc exists and
+// decrypts. Without STAGE, configuration from plain environment
+// variables alone (e.g. Docker Compose, Kubernetes) keeps working.
 //
 // This file deliberately implements its own small AES-256-GCM
 // encrypt/decrypt rather than importing services.EncryptionService: this
-// package has zero internal dependencies today (it's the first thing
-// that runs, before any service exists) and reusing that type would make
-// config depend on services -- backwards from every other dependency
-// direction in this app. The scheme is identical (same
-// base64(nonce‖ciphertext‖tag) shape), just duplicated in ~20 lines
-// rather than imported.
+// package has zero internal dependencies (it runs before any service
+// exists), and depending on services would invert every other dependency
+// direction in this app.
 package config
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 const masterKeyLen = 32 // AES-256
 
-// encPrefix/encSuffix wrap an encrypted value in the INI file, e.g.
-// JWT_SECRET = ENC(kY3f...==). Anything not wrapped this way is used as a
-// literal plaintext value -- non-secret config (ports, intervals, public
-// URLs) never needs to be encrypted at all.
+// encPrefix/encSuffix wrap a single encrypted value, e.g.
+// JWT_SECRET=ENC(kY3f...==), in a .env file or a legacy ini file.
 const (
 	encPrefix = "ENC("
 	encSuffix = ")"
 )
 
-// masterKeyFile is the local-development-only fallback location for the
-// master key -- see resolveMasterKey. Never read when APP_ENV is
-// "production", and always gitignored (see .gitignore).
+// fileHeader starts a whole-file-encrypted config file.
+const fileHeader = "IHCENC1:"
+
+// Stages a config file can be encrypted for.
+var Stages = []string{"development", "staging", "production"}
+
+// masterKeyFile is the development-only fallback location for the master
+// key -- see resolveMasterKey. Always gitignored.
 const masterKeyFile = ".master.key"
 
-// resolveMasterKey finds the one key that decrypts every ENC(...) value.
-// Production/staging must set INFRAHUB_MASTER_KEY as a real environment
-// variable (systemd/Docker/CI secret) -- this never reads a file when
-// appEnv is "production", specifically so a key file can never end up
-// sitting on a production host by habit or by copying a dev setup
-// verbatim. Local development additionally falls back to a small
-// gitignored file next to the ini files, so `go run ./cmd/server` just
-// works without exporting anything by hand every session.
-func resolveMasterKey(appEnv string) (string, error) {
-	if key := os.Getenv("INFRAHUB_MASTER_KEY"); key != "" {
+// The older names INFRAHUB_ENV / INFRAHUB_MASTER_KEY / INFRAHUB_MASTER_KEY_FILE
+// still work in place of STAGE / SECRET / SECRET_FILE.
+
+// firstEnv returns the first non-empty variable among names.
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stageEnv is the explicitly given stage (STAGE, or the older INFRAHUB_ENV).
+func stageEnv() string { return firstEnv("STAGE", "INFRAHUB_ENV") }
+
+// SecretFromEnv returns the master key from SECRET (or INFRAHUB_MASTER_KEY),
+// or read from the file named by SECRET_FILE (or INFRAHUB_MASTER_KEY_FILE).
+// Empty when none is set.
+func SecretFromEnv() (string, error) {
+	if key := firstEnv("SECRET", "INFRAHUB_MASTER_KEY"); key != "" {
 		return key, nil
 	}
-	if path := os.Getenv("INFRAHUB_MASTER_KEY_FILE"); path != "" {
+	if path := firstEnv("SECRET_FILE", "INFRAHUB_MASTER_KEY_FILE"); path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("read INFRAHUB_MASTER_KEY_FILE (%s): %w", path, err)
+			return "", fmt.Errorf("read SECRET_FILE (%s): %w", path, err)
 		}
 		return strings.TrimSpace(string(data)), nil
 	}
-	if appEnv == "production" {
-		return "", nil // no file fallback in production -- see doc comment above
+	return "", nil
+}
+
+// Stage is the deployment stage: STAGE, else APP_ENV, else
+// "development". It must come from the real process environment -- it
+// picks which file to open, so it can't live inside that file.
+func Stage() string {
+	if s := stageEnv(); s != "" {
+		return s
 	}
-	data, err := os.ReadFile(masterKeyFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	return getEnv("APP_ENV", "development")
+}
+
+// resolveMasterKey finds the key that decrypts <stage>.ini.enc and any
+// ENC(...) value. Staging and production must provide it as a real
+// environment variable or a mounted secret file (SECRET_FILE);
+// only development falls back to a local .master.key, so a key file can't
+// end up on a server by copying a dev setup.
+func resolveMasterKey(stage, dir string, strict bool) (string, error) {
+	if key, err := SecretFromEnv(); err != nil || key != "" {
+		return key, err
+	}
+	if strict || stage != "development" {
+		return "", nil
+	}
+	for _, path := range []string{filepath.Join(dir, masterKeyFile), masterKeyFile} {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data)), nil
 		}
-		return "", fmt.Errorf("read %s: %w", masterKeyFile, err)
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
 	}
-	return strings.TrimSpace(string(data)), nil
+	return "", nil
 }
 
-// decryptValue reverses the AES-256-GCM encryption cmd/encrypt-config-value
-// produces. base64Key must decode to exactly 32 bytes.
-func decryptValue(base64Key, encoded string) (string, error) {
+func newGCM(base64Key string) (cipher.AEAD, error) {
 	key, err := base64.StdEncoding.DecodeString(base64Key)
 	if err != nil {
-		return "", fmt.Errorf("decode master key: %w", err)
+		return nil, fmt.Errorf("decode master key: %w", err)
 	}
 	if len(key) != masterKeyLen {
-		return "", fmt.Errorf("master key must decode to %d bytes, got %d", masterKeyLen, len(key))
+		return nil, fmt.Errorf("master key must decode to %d bytes, got %d", masterKeyLen, len(key))
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("create cipher: %w", err)
+		return nil, fmt.Errorf("create cipher: %w", err)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("create GCM: %w", err)
-	}
-	sealed, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("decode ciphertext: %w", err)
-	}
-	nonceSize := gcm.NonceSize()
-	if len(sealed) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	nonce, ciphertext := sealed[:nonceSize], sealed[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypt: wrong master key, or the value was tampered with")
-	}
-	return string(plaintext), nil
+	return cipher.NewGCM(block)
 }
 
-// EncryptValue is decryptValue's inverse -- exported so cmd/encrypt-config-value
-// is the only other caller, keeping the AES-256-GCM implementation itself
-// in exactly one place in this package.
-func EncryptValue(base64Key, plaintext string) (string, error) {
-	key, err := base64.StdEncoding.DecodeString(base64Key)
+func seal(base64Key string, plaintext, aad []byte) (string, error) {
+	gcm, err := newGCM(base64Key)
 	if err != nil {
-		return "", fmt.Errorf("decode master key: %w", err)
-	}
-	if len(key) != masterKeyLen {
-		return "", fmt.Errorf("master key must decode to %d bytes, got %d", masterKeyLen, len(key))
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", fmt.Errorf("create cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("create GCM: %w", err)
+		return "", err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("generate nonce: %w", err)
 	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return encPrefix + base64.StdEncoding.EncodeToString(sealed) + encSuffix, nil
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, plaintext, aad)), nil
 }
 
-// LoadEnv resolves APP_ENV and loads its .ini file into the process
-// environment -- exported so standalone commands that need env vars
-// before they can do anything else (cmd/migrate, most notably: it needs
-// DATABASE_URL to even open a connection) call exactly this instead of
-// duplicating Load()'s own first two lines or, worse, going back to
-// godotenv.
+func open(base64Key, encoded string, aad []byte) ([]byte, error) {
+	gcm, err := newGCM(base64Key)
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("decode ciphertext: %w", err)
+	}
+	if len(sealed) < gcm.NonceSize() {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	plaintext, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], aad)
+	if err != nil {
+		return nil, fmt.Errorf("wrong master key, wrong stage, or the data was tampered with")
+	}
+	return plaintext, nil
+}
+
+func stageAAD(stage string) []byte { return []byte("infrahub-config:" + stage) }
+
+// EncryptValue returns plaintext as ENC(...), for a single value in a .env file.
+func EncryptValue(base64Key, plaintext string) (string, error) {
+	out, err := seal(base64Key, []byte(plaintext), nil)
+	if err != nil {
+		return "", err
+	}
+	return encPrefix + out + encSuffix, nil
+}
+
+func decryptValue(base64Key, encoded string) (string, error) {
+	out, err := open(base64Key, encoded, nil)
+	return string(out), err
+}
+
+// EncryptFile encrypts a whole plaintext config (INI / KEY=VALUE text) for
+// one stage, returning the single line to store in <stage>.ini.enc.
+func EncryptFile(base64Key, stage string, plaintext []byte) (string, error) {
+	out, err := seal(base64Key, plaintext, stageAAD(stage))
+	if err != nil {
+		return "", err
+	}
+	return fileHeader + out + "\n", nil
+}
+
+// DecryptFile reverses EncryptFile. It fails unless both the key and the
+// stage match the ones the file was encrypted with.
+func DecryptFile(base64Key, stage string, content []byte) ([]byte, error) {
+	text := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(text, fileHeader) {
+		return nil, fmt.Errorf("not a whole-file encrypted config (missing %s header)", fileHeader)
+	}
+	return open(base64Key, strings.TrimPrefix(text, fileHeader), stageAAD(stage))
+}
+
+// IsEncryptedFile reports whether content is whole-file encrypted.
+func IsEncryptedFile(content []byte) bool {
+	return bytes.HasPrefix(bytes.TrimSpace(content), []byte(fileHeader))
+}
+
+// LoadEnv fills the process environment from .env and <stage>.ini.enc (see
+// the package comment). Called by config.Load; cmd/migrate calls it
+// directly.
 func LoadEnv() error {
-	return loadEnvFile(getEnv("APP_ENV", "development"))
+	return loadEnvFile(Stage())
 }
 
-// loadEnvFile is godotenv.Load's replacement: parses <appEnv>.ini.enc
-// (development.ini.enc or production.ini.enc, resolved relative to the
-// current working directory, or INFRAHUB_CONFIG_DIR if set), decrypts
-// every ENC(...)-wrapped value, and sets each key in the process
-// environment -- but only if that key isn't already set, exactly
-// matching godotenv's own "a real deployment env var always wins over
-// the file" precedent. A missing ini file is not an error (mirrors the
-// old `_ = godotenv.Load()` best-effort call it replaces); a present
-// file with an ENC(...) value but no resolvable master key is a hard
-// error, since silently setting the raw ciphertext as the env var's
-// value would fail in a far more confusing place (e.g. an unparseable
-// DATABASE_URL) than right here.
-func loadEnvFile(appEnv string) error {
-	dir := os.Getenv("INFRAHUB_CONFIG_DIR")
-	path := appEnv + ".ini.enc"
-	if dir != "" {
-		path = dir + string(os.PathSeparator) + path
+func configDir() string {
+	if dir := os.Getenv("INFRAHUB_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	return "."
+}
+
+// StrictMode reports whether STAGE is set (see the package comment).
+func StrictMode() bool {
+	return stageEnv() != ""
+}
+
+func loadEnvFile(stage string) error {
+	dir := configDir()
+	strict := StrictMode()
+	if strict {
+		known := false
+		for _, s := range Stages {
+			known = known || s == stage
+		}
+		if !known {
+			return fmt.Errorf("STAGE=%q: must be one of %s", stage, strings.Join(Stages, ", "))
+		}
+		if firstEnv("SECRET", "INFRAHUB_MASTER_KEY", "SECRET_FILE", "INFRAHUB_MASTER_KEY_FILE") == "" {
+			return fmt.Errorf("STAGE=%s is set, so SECRET (or SECRET_FILE) is required -- the API won't start without the stage's secret", stage)
+		}
+		encPath := filepath.Join(dir, stage+".ini.enc")
+		content, err := os.ReadFile(encPath)
+		if err != nil {
+			return fmt.Errorf("STAGE=%s is set, so %s is required: %w", stage, encPath, err)
+		}
+		if !IsEncryptedFile(content) {
+			return fmt.Errorf("%s must be an encrypted config file (infrahub-config encrypt --stage %s)", encPath, stage)
+		}
+	}
+	// Everything else reads the stage from APP_ENV, so record it (an
+	// explicit STAGE wins over the image's default APP_ENV).
+	if _, ok := os.LookupEnv("APP_ENV"); !ok || stageEnv() != "" {
+		_ = os.Setenv("APP_ENV", stage)
 	}
 
-	values, err := parseINIFile(path)
-	if err != nil {
+	// 2. .env
+	envPath := os.Getenv("INFRAHUB_ENV_FILE")
+	if envPath == "" {
+		envPath = filepath.Join(dir, ".env")
+	}
+	if err := applyFile(envPath, stage, dir, false, strict); err != nil {
 		return err
 	}
-	if values == nil {
-		return nil
+
+	// 3. <stage>.ini.enc
+	return applyFile(filepath.Join(dir, stage+".ini.enc"), stage, dir, true, strict)
+}
+
+// applyFile sets every KEY=VALUE in path that isn't already set. A
+// whole-file encrypted file is decrypted first (only allowed for the
+// stage's .ini.enc); ENC(...) values are decrypted one by one.
+func applyFile(path, stage, dir string, allowWholeFile, strict bool) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	var masterKey string
-	var masterKeyResolved bool
-	for key, raw := range values {
-		if _, exists := os.LookupEnv(key); exists {
+	var keyResolved bool
+	needKey := func(what string) (string, error) {
+		if !keyResolved {
+			masterKey, err = resolveMasterKey(stage, dir, strict)
+			if err != nil {
+				return "", err
+			}
+			keyResolved = true
+		}
+		if masterKey == "" {
+			hint := "set SECRET (or SECRET_FILE)"
+			if stage == "development" {
+				hint += ", or create " + filepath.Join(dir, masterKeyFile)
+			}
+			return "", fmt.Errorf("%s: %s needs the master key -- %s", path, what, hint)
+		}
+		return masterKey, nil
+	}
+
+	if IsEncryptedFile(content) {
+		if !allowWholeFile {
+			return fmt.Errorf("%s is an encrypted config file; name it %s.ini.enc instead", path, stage)
+		}
+		// Without STAGE this deployment is configured some other way (plain
+		// environment variables, .env): an encrypted file it holds no secret
+		// for -- e.g. the ones baked into the public image -- is not for it.
+		if !strict {
+			if key, err := resolveMasterKey(stage, dir, false); err != nil || key == "" {
+				return err
+			}
+		}
+		key, err := needKey("decrypting the file")
+		if err != nil {
+			return err
+		}
+		content, err = DecryptFile(key, stage, content)
+		if err != nil {
+			return fmt.Errorf("%s (stage %q): %w", path, stage, err)
+		}
+	}
+
+	values, err := parseINI(content, path)
+	if err != nil {
+		return err
+	}
+	for _, kv := range values {
+		if _, exists := os.LookupEnv(kv.key); exists {
 			continue
 		}
-		value := raw
-		if strings.HasPrefix(raw, encPrefix) && strings.HasSuffix(raw, encSuffix) {
-			if !masterKeyResolved {
-				masterKey, err = resolveMasterKey(appEnv)
-				if err != nil {
-					return err
-				}
-				masterKeyResolved = true
-			}
-			if masterKey == "" {
-				return fmt.Errorf(
-					"%s contains an encrypted value for %s, but no master key is available -- "+
-						"set INFRAHUB_MASTER_KEY (or, for local development only, create %s next to %s). "+
-						"Generate one with: go run ./cmd/gen-encryption-key",
-					path, key, masterKeyFile, path,
-				)
-			}
-			decoded, err := decryptValue(masterKey, strings.TrimSuffix(strings.TrimPrefix(raw, encPrefix), encSuffix))
+		value := kv.value
+		if strings.HasPrefix(value, encPrefix) && strings.HasSuffix(value, encSuffix) {
+			key, err := needKey("the encrypted value of " + kv.key)
 			if err != nil {
-				return fmt.Errorf("%s: decrypt %s: %w", path, key, err)
+				return err
 			}
-			value = decoded
+			value, err = decryptValue(key, strings.TrimSuffix(strings.TrimPrefix(value, encPrefix), encSuffix))
+			if err != nil {
+				return fmt.Errorf("%s: decrypt %s: %w", path, kv.key, err)
+			}
 		}
-		if err := os.Setenv(key, value); err != nil {
-			return fmt.Errorf("set %s: %w", key, err)
+		if err := os.Setenv(kv.key, value); err != nil {
+			return fmt.Errorf("set %s: %w", kv.key, err)
 		}
 	}
 	return nil
+}
+
+// DecryptValues returns content (KEY=VALUE text) with every ENC(...) value
+// replaced by its plaintext and comments kept -- used to convert an older
+// per-value encrypted file to the whole-file format.
+func DecryptValues(base64Key string, content []byte) ([]byte, error) {
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		idx := strings.IndexByte(trimmed, '=')
+		if idx > 0 && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, ";") {
+			value := strings.TrimSpace(trimmed[idx+1:])
+			if strings.HasPrefix(value, encPrefix) && strings.HasSuffix(value, encSuffix) {
+				plain, err := decryptValue(base64Key, strings.TrimSuffix(strings.TrimPrefix(value, encPrefix), encSuffix))
+				if err != nil {
+					return nil, fmt.Errorf("decrypt %s: %w", strings.TrimSpace(trimmed[:idx]), err)
+				}
+				out.WriteString(strings.TrimSpace(trimmed[:idx]) + "=" + plain + "\n")
+				continue
+			}
+		}
+		out.WriteString(line)
+	}
+	return []byte(out.String()), nil
 }

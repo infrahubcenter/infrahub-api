@@ -16,3 +16,10 @@ bin/
 start.sh
 compose*.yml
 .dev-server.log
+# Plain config with real values and the per-stage secrets must never reach
+# an image -- only the encrypted <stage>.ini.enc files and the example do.
+*.ini
+!config.example.ini
+*.tmp
+secrets/
+config.sh

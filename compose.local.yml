@@ -47,8 +47,8 @@ services:
       APP_ENV: development
       DATABASE_URL: postgres://vmcc:vmcc_dev_password@postgres:5432/vmcc?sslmode=disable
     volumes:
-      - ./development.ini.enc:/app/development.ini.enc:ro
-      - ./.master.key:/app/.master.key:ro
+      - ./development.ini.enc:/app/config/development.ini.enc:ro
+      - ./.master.key:/app/config/.master.key:ro
     ports:
       - "8080:8080"
     healthcheck:

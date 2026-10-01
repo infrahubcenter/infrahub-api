@@ -342,18 +342,14 @@ type Config struct {
 // Load reads configuration from environment variables, applying sane
 // defaults for local development where possible.
 func Load() (*Config, error) {
-	// Loads <APP_ENV>.ini (development.ini.enc/production.ini.enc) -- see
-	// encrypted_env.go's own doc comment for why this replaced a plaintext
-	// .env file. Best-effort in the same spirit .env's loader always was:
-	// a missing ini file is not an error, since a real deployment may set
-	// every env var directly with no file at all. APP_ENV itself must
-	// come from the real process environment (or default to
-	// "development") to pick which file to open -- it can't live inside
-	// the file being selected by its own value.
-	appEnv := getEnv("APP_ENV", "development")
-	if err := loadEnvFile(appEnv); err != nil {
+	// Fills the environment from .env and the stage's encrypted
+	// <stage>.ini.enc, without overriding real environment variables --
+	// see encrypted_env.go. Missing files are fine: a deployment may set
+	// every variable directly.
+	if err := LoadEnv(); err != nil {
 		return nil, err
 	}
+	appEnv := getEnv("APP_ENV", "development")
 
 	// The single source of truth for "this deployment's one externally-
 	// reachable origin" -- e.g. https://your-tunnel-or-domain. When set,

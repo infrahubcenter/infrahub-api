@@ -24,13 +24,22 @@ vendor/
 .env.local
 .env.*.local
 # Contains a real JWT_SECRET/DB password from before the encrypted
-# development.ini.enc config replaced plain .env files -- never commit.
 .env.superseded-by-ini
+# Plain config with real values stays on your machine. The encrypted
+# <stage>.ini.enc files ARE committed: each is one line of ciphertext,
+# useless without that stage's SECRET (kept in /secrets/,
+# below, and shared with a deployment by hand).
+*.ini
+!config.example.ini
+*.ini.tmp
+*.ini.enc.tmp
+/config/
+master.key
 
 # The one key that decrypts development.ini/production.ini's ENC(...)
 # values (local development convenience only -- see
 # internal/config/encrypted_env.go). Never commit this; production sets
-# INFRAHUB_MASTER_KEY as a real environment variable instead of a file.
+# SECRET as a real environment variable instead of a file.
 .master.key
 
 # --- OS ---
@@ -48,3 +57,9 @@ start.sh
 .local-logs/
 /CLAUDE.md
 /AGENTS.md
+
+# Local per-stage secrets (STAGE + SECRET) -- never commit.
+/secrets/
+
+# Local helper for the encrypted config -- stays on this machine.
+/config.sh

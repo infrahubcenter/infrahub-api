@@ -33,7 +33,7 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server && \
     go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed && \
     go build -trimpath -ldflags="-s -w" -o /out/bootstrap-admin ./cmd/bootstrap-admin && \
     go build -trimpath -ldflags="-s -w" -o /out/gen-encryption-key ./cmd/gen-encryption-key && \
-    go build -trimpath -ldflags="-s -w" -o /out/encrypt-config-value ./cmd/encrypt-config-value
+    go build -trimpath -ldflags="-s -w" -o /out/encrypt-config-value ./cmd/encrypt-config-value &&     go build -trimpath -ldflags="-s -w" -o /out/infrahub-config ./cmd/infrahub-config
 
 # --- Runtime stage ---
 FROM alpine:3.20 AS runtime
@@ -45,18 +45,18 @@ RUN apk add --no-cache ca-certificates && \
     addgroup -S app && adduser -S -G app -H -D app
 
 WORKDIR /app
-COPY --from=build /out/server /out/migrate /out/seed /out/bootstrap-admin /out/gen-encryption-key /out/encrypt-config-value ./
+COPY --from=build /out/server /out/migrate /out/seed /out/bootstrap-admin /out/gen-encryption-key /out/encrypt-config-value /out/infrahub-config ./
 # goose (cmd/migrate) reads migrations from disk at a relative "migrations"
 # path, not an embedded filesystem -- see cmd/migrate/main.go -- so the
 # directory has to travel with the binary.
 COPY --from=build /src/migrations ./migrations
-# Only the production template ships in the image (every secret VALUE in
-# it is AES-256-GCM ciphertext, see internal/config/encrypted_env.go).
-# Deployments either set DATABASE_URL, JWT_SECRET, ... as plain
-# environment variables -- which always win over the file -- or point
-# INFRAHUB_CONFIG_DIR at their own encrypted production.ini.enc and supply
-# INFRAHUB_MASTER_KEY at container start.
-COPY --from=build /src/production.ini.enc ./
+# The encrypted per-stage configs (<stage>.ini.enc, one line of ciphertext
+# each) ship in /app/config. A deployment then only supplies two values:
+# STAGE (the stage) and SECRET (its secret) -- see
+# internal/config/encrypted_env.go. Plain environment variables, a mounted
+# .env, or a mounted /app/config still work and win over the baked-in file.
+ENV INFRAHUB_CONFIG_DIR=/app/config
+COPY --from=build /src/config.example.ini /src/*.ini.enc ./config/
 # Runs migrations + seed (+ first admin) before the server -- see the
 # script's own header for the switches.
 COPY --chmod=0755 docker-entrypoint.sh ./

@@ -8,20 +8,25 @@
 #   docker compose up -d --build
 #   docker compose exec infrahub-api ./migrate up
 #
-# Required first: production.ini.enc filled in with real values
-# (DATABASE_URL must point at your real Postgres endpoint -- "postgres"
-# as a hostname only resolves inside the repo-root compose's own
-# network, not here) and INFRAHUB_MASTER_KEY set in the shell/CI secret
-# store that runs this command (never baked into the image or committed
-# -- see internal/config/encrypted_env.go).
+# Configuration, any of (see config.example.ini):
+#   - a .env file next to this compose file (copy .env.example), or
+#   - ./config/production.ini.enc (infrahub-config encrypt --stage production)
+#     plus SECRET exported in the shell/CI secret store that runs
+#     this command -- never committed or baked into the image.
+# DATABASE_URL must point at your real Postgres endpoint.
 services:
   infrahub-api:
     build:
       context: .
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
-      APP_ENV: production
-      INFRAHUB_MASTER_KEY: ${INFRAHUB_MASTER_KEY:?INFRAHUB_MASTER_KEY is required -- it decrypts production.ini.enc, see docs/deployment.md}
+      STAGE: ${STAGE:-}
+      SECRET: ${SECRET:-}
+    volumes:
+      - ./config:/app/config:ro
     ports:
       - "${APP_PORT:-8080}:8080"
     healthcheck:

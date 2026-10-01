@@ -6,13 +6,13 @@
 //
 // Usage:
 //
-//	INFRAHUB_MASTER_KEY=<key> go run ./cmd/encrypt-config-value "the secret value"
-//	INFRAHUB_MASTER_KEY=<key> go run ./cmd/encrypt-config-value   # reads one line from stdin instead
+//	SECRET=<key> go run ./cmd/encrypt-config-value "the secret value"
+//	SECRET=<key> go run ./cmd/encrypt-config-value   # reads one line from stdin instead
 //
 // The master key is never guessed or defaulted here (unlike the server's
 // own local-development file fallback) -- this command has no
 // development-vs-production context to decide whether that fallback
-// would even be appropriate, so it always requires INFRAHUB_MASTER_KEY
+// would even be appropriate, so it always requires SECRET
 // explicitly. Generate one with: go run ./cmd/gen-encryption-key
 package main
 
@@ -26,9 +26,13 @@ import (
 )
 
 func main() {
-	key := os.Getenv("INFRAHUB_MASTER_KEY")
+	key, err := config.SecretFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "encrypt-config-value:", err)
+		os.Exit(1)
+	}
 	if key == "" {
-		fmt.Fprintln(os.Stderr, "encrypt-config-value: INFRAHUB_MASTER_KEY is not set (generate one with: go run ./cmd/gen-encryption-key)")
+		fmt.Fprintln(os.Stderr, "encrypt-config-value: SECRET is not set (generate one with: go run ./cmd/gen-encryption-key)")
 		os.Exit(1)
 	}
 
